@@ -133,8 +133,8 @@ std::vector<Token> lex(const std::string& s)
         else
         {
             bool found = false;
-            for (const char* op :
-                 {"..=", "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", ".."})
+            for (const char* op : {"..=", "->", "=>", "::", "==", "!=", "<=", ">=", "&&", "||",
+                                   "+=", "-=", "*=", "/=", ".."})
             {
                 size_t n = std::string(op).size();
                 if (s.compare(i, n, op) == 0)
@@ -149,7 +149,7 @@ std::vector<Token> lex(const std::string& s)
             }
             if (!found)
             {
-                if (std::string("(){};,:+-*/%!=<>").find(s[i]) == std::string::npos)
+                if (std::string("(){};,:.+-*/%!=<>&").find(s[i]) == std::string::npos)
                 {
                     error("unsupported character");
                 }
@@ -163,9 +163,48 @@ std::vector<Token> lex(const std::string& s)
 }
 class Parser
 {
+    struct Field
+    {
+        std::string name;
+        std::string type;
+    };
+    enum class VariantKind
+    {
+        Unit,
+        Tuple,
+        Named,
+    };
+    struct Variant
+    {
+        std::string name;
+        VariantKind kind = VariantKind::Unit;
+        std::vector<Field> fields;
+    };
+    struct DataType
+    {
+        std::string name;
+        bool isEnum = false;
+        std::vector<Field> fields;
+        std::vector<Variant> variants;
+    };
+    struct Function
+    {
+        std::string name;
+        std::string owner;
+        std::string result;
+        std::string parameters;
+        bool receiver = false;
+        bool constReceiver = false;
+        size_t body = 0;
+    };
     std::vector<Token> ts;
+    std::vector<DataType> dataTypes;
+    std::vector<Function> functions;
     size_t p = 0, serial = 0;
     std::string returnType;
+    std::string implType;
+    bool hasReceiver = false;
+    size_t valueDepth = 0;
     const std::string& peek() const
     {
         return ts[p].text;
@@ -203,6 +242,23 @@ class Parser
     }
     std::string type()
     {
+        if (take("&"))
+        {
+            const bool mutableReference = take("mut");
+            return (mutableReference ? "" : "const ") + type() + "&";
+        }
+        if (take("String"))
+        {
+            return "std::string";
+        }
+        if (take("Self"))
+        {
+            if (implType.empty())
+            {
+                fail("Self requires an impl block");
+            }
+            return implType;
+        }
         for (const std::pair<std::string, std::string>& e :
              std::vector<std::pair<std::string, std::string>>
              {
@@ -231,7 +287,231 @@ class Parser
             need(")");
             return "void";
         }
-        fail("unsupported type");
+        return name();
+    }
+
+    const DataType* findType(const std::string& name) const
+    {
+        for (const DataType& data : dataTypes)
+        {
+            if (data.name == name)
+            {
+                return &data;
+            }
+        }
+        return nullptr;
+    }
+
+    const Variant& findVariant(const DataType& data, const std::string& name) const
+    {
+        for (const Variant& variant : data.variants)
+        {
+            if (variant.name == name)
+            {
+                return variant;
+            }
+        }
+        fail("unknown enum variant");
+    }
+
+    std::vector<Field> fields(const std::string& close)
+    {
+        std::vector<Field> result;
+        while (!take(close))
+        {
+            take("pub");
+            const std::string field = name();
+            need(":");
+            result.push_back({field, type()});
+            if (!take(","))
+            {
+                need(close);
+                break;
+            }
+        }
+        return result;
+    }
+
+    void dataDeclaration(bool isEnum)
+    {
+        DataType data;
+        data.name = name();
+        data.isEnum = isEnum;
+        need("{");
+        if (!isEnum)
+        {
+            data.fields = fields("}");
+        }
+        else
+        {
+            while (!take("}"))
+            {
+                Variant variant;
+                variant.name = name();
+                if (take("("))
+                {
+                    variant.kind = VariantKind::Tuple;
+                    while (!take(")"))
+                    {
+                        const std::string fieldName =
+                            "nr_field_" + std::to_string(variant.fields.size());
+                        variant.fields.push_back({fieldName, type()});
+                        if (!take(","))
+                        {
+                            need(")");
+                            break;
+                        }
+                    }
+                }
+                else if (take("{"))
+                {
+                    variant.kind = VariantKind::Named;
+                    variant.fields = fields("}");
+                }
+                data.variants.push_back(variant);
+                if (!take(","))
+                {
+                    need("}");
+                    break;
+                }
+            }
+            if (data.variants.empty())
+            {
+                fail("empty enums are not supported yet");
+            }
+        }
+        dataTypes.push_back(data);
+    }
+
+    void functionDeclaration(const std::string& owner = "")
+    {
+        Function function;
+        function.owner = owner;
+        function.name = name();
+        implType = owner;
+        need("(");
+        if (!take(")"))
+        {
+            if (!owner.empty() && (peek() == "&" || peek() == "self" || peek() == "mut"))
+            {
+                const bool reference = take("&");
+                const bool mutableReceiver = take("mut");
+                need("self");
+                function.receiver = true;
+                function.constReceiver = reference && !mutableReceiver;
+                if (peek() != ")")
+                {
+                    need(",");
+                }
+            }
+            while (!take(")"))
+            {
+                take("mut");
+                const std::string parameter = name();
+                need(":");
+                const std::string parameterType = type();
+                if (!function.parameters.empty())
+                {
+                    function.parameters += ", ";
+                }
+                function.parameters += parameterType + " " + parameter;
+                if (!take(","))
+                {
+                    need(")");
+                    break;
+                }
+            }
+        }
+        function.result = take("->") ? type() : "void";
+        function.body = p;
+        need("{");
+        size_t depth = 1;
+        while (depth != 0)
+        {
+            if (peek() == "<eof>")
+            {
+                fail("unterminated function body");
+            }
+            if (take("{"))
+            {
+                ++depth;
+            }
+            else if (take("}"))
+            {
+                --depth;
+            }
+            else
+            {
+                ++p;
+            }
+        }
+        functions.push_back(function);
+        implType.clear();
+    }
+
+    // Evaluate named initializers in source order, then arrange aggregate fields in declaration
+    // order.
+    std::string namedConstruction(const std::string& resultType, const std::vector<Field>& declared)
+    {
+        need("{");
+        const std::string id = std::to_string(serial++);
+        std::vector<std::string> values(declared.size());
+        std::string result = "([&]() {\n";
+        while (!take("}"))
+        {
+            const std::string field = name();
+            size_t index = 0;
+            while (index < declared.size() && declared[index].name != field)
+            {
+                ++index;
+            }
+            if (index == declared.size() || !values[index].empty())
+            {
+                fail("unknown or repeated initializer field");
+            }
+            const std::string value = take(":") ? expr() : field;
+            values[index] = "nr_init_" + id + "_" + std::to_string(index);
+            result += "auto " + values[index] + " = " + value + ";\n";
+            if (!take(","))
+            {
+                need("}");
+                break;
+            }
+        }
+        result += "return " + resultType + "{";
+        for (size_t i = 0; i < declared.size(); ++i)
+        {
+            if (values[i].empty())
+            {
+                fail("missing initializer field");
+            }
+            if (i != 0)
+            {
+                result += ", ";
+            }
+            result += "std::move(" + values[i] + ")";
+        }
+        return result + "};\n}())";
+    }
+
+    std::string arguments()
+    {
+        need("(");
+        std::string result;
+        while (!take(")"))
+        {
+            if (!result.empty())
+            {
+                result += ", ";
+            }
+            result += expr();
+            if (!take(","))
+            {
+                need(")");
+                break;
+            }
+        }
+        return result;
     }
     static int prec(const std::string& op)
     {
@@ -261,14 +541,28 @@ class Parser
         }
         return 0;
     }
-    std::string expr(int min = 1)
+    std::string expr(int min = 1, bool allowConstruction = true)
     {
         std::string left;
-        if (peek() == "!" || peek() == "-")
+        if (take("match"))
+        {
+            left = match(true);
+        }
+        else if (take("&"))
+        {
+            take("mut");
+            left = "(" + expr(7, allowConstruction) + ")";
+        }
+        else if (take("*"))
+        {
+            // Rust references use C++ references, so dereferencing needs no pointer operation.
+            left = "(" + expr(7, allowConstruction) + ")";
+        }
+        else if (peek() == "!" || peek() == "-")
         {
             const std::string op = peek();
             ++p;
-            left = "(" + op + expr(7) + ")";
+            left = "(" + op + expr(7, allowConstruction) + ")";
         }
         else if (take("("))
         {
@@ -288,35 +582,268 @@ class Parser
         }
         else
         {
-            left = name();
-            if (take("("))
+            if (take("self"))
             {
-                left += "(";
-                if (!take(")"))
+                if (!hasReceiver)
                 {
-                    bool first = true;
-                    do
-                    {
-                        if (!first)
-                        {
-                            left += ", ";
-                        }
-                        first = false;
-                        left += expr();
-                    } while (take(",") && peek() != ")");
-                    need(")");
+                    fail("self requires a method receiver");
                 }
-                left += ")";
+                left = "(*this)";
+            }
+            else if (take("Self"))
+            {
+                if (implType.empty())
+                {
+                    fail("Self requires an impl block");
+                }
+                left = implType;
+            }
+            else
+            {
+                left = name();
+            }
+            const DataType* data = findType(left);
+            if (take("::"))
+            {
+                const std::string member = name();
+                if (data != nullptr && data->isEnum)
+                {
+                    // Associated methods share this syntax with variant constructors.
+                    const Variant* variant = nullptr;
+                    for (const Variant& candidate : data->variants)
+                    {
+                        if (candidate.name == member)
+                        {
+                            variant = &candidate;
+                            break;
+                        }
+                    }
+                    if (variant != nullptr)
+                    {
+                        const std::string caseType = left + "::nr_case_" + member;
+                        std::string payload;
+                        if (variant->kind == VariantKind::Named)
+                        {
+                            payload = namedConstruction(caseType, variant->fields);
+                        }
+                        else if (variant->kind == VariantKind::Tuple)
+                        {
+                            payload = caseType + "{" + arguments() + "}";
+                        }
+                        else
+                        {
+                            payload = caseType + "{}";
+                        }
+                        left += "{" + payload + "}";
+                    }
+                    else
+                    {
+                        left += "::" + member;
+                    }
+                }
+                else if (left == "rs_String" && member == "rs_from")
+                {
+                    left = "std::string";
+                }
+                else
+                {
+                    left += "::" + member;
+                }
+            }
+            else if (allowConstruction && data != nullptr && !data->isEnum && peek() == "{")
+            {
+                left = namedConstruction(data->name, data->fields);
+            }
+        }
+        while (peek() == "(" || peek() == ".")
+        {
+            if (peek() == "(")
+            {
+                left += "(" + arguments() + ")";
+            }
+            else
+            {
+                need(".");
+                left += "." + name();
             }
         }
         while (prec(peek()) >= min)
         {
             const std::string op = peek();
             ++p;
-            const std::string right = expr(prec(op) + 1);
+            const std::string right = expr(prec(op) + 1, allowConstruction);
             left = "(" + left + " " + op + " " + right + ")";
         }
         return left;
+    }
+
+    std::string match(bool value, bool returnTail = false)
+    {
+        const std::string subject = expr(1, false);
+        if (returnTail)
+        {
+            value = finalMatch();
+        }
+        need("{");
+        const std::string id = std::to_string(serial++);
+        const std::string variable = "nr_match_" + id;
+        const std::string payload = "nr_payload_" + id;
+        std::string result = returnTail && value ? "return " : "";
+        result += value ? "([&]() {\n" : "{\n";
+        result += "auto&& " + variable + " = " + subject + ";\n";
+        bool first = true;
+        bool wildcard = false;
+        while (!take("}"))
+        {
+            if (wildcard)
+            {
+                fail("wildcard match arm must be last");
+            }
+            std::string bindings;
+            if (take("_"))
+            {
+                wildcard = true;
+                result += first ? "{\n" : "else {\n";
+            }
+            else
+            {
+                const std::string enumName = take("Self") ? implType : name();
+                const DataType* data = findType(enumName);
+                if (data == nullptr || !data->isEnum)
+                {
+                    fail("match currently requires Enum::Variant patterns or _");
+                }
+                need("::");
+                const Variant& variant = findVariant(*data, name());
+                const std::string caseType = enumName + "::nr_case_" + variant.name;
+                result += first ? "if (" : "else if (";
+                result += "const " + caseType + "* " + payload + " = std::get_if<" + caseType +
+                          ">(&" + variable + ".nr_value)) {\n";
+                if (variant.kind == VariantKind::Tuple)
+                {
+                    need("(");
+                    size_t index = 0;
+                    while (!take(")"))
+                    {
+                        if (index == variant.fields.size())
+                        {
+                            fail("too many tuple pattern bindings");
+                        }
+                        take("mut");
+                        if (!take("_"))
+                        {
+                            const std::string binding = name();
+                            bindings += "auto " + binding + " = " + payload + "->" +
+                                        variant.fields[index].name + ";\n";
+                        }
+                        ++index;
+                        if (!take(","))
+                        {
+                            need(")");
+                            break;
+                        }
+                    }
+                    if (index != variant.fields.size())
+                    {
+                        fail("tuple pattern needs one binding per field");
+                    }
+                }
+                else if (variant.kind == VariantKind::Named)
+                {
+                    need("{");
+                    std::vector<std::string> seen;
+                    bool rest = false;
+                    while (!take("}"))
+                    {
+                        if (take(".."))
+                        {
+                            rest = true;
+                            take(",");
+                            need("}");
+                            break;
+                        }
+                        const std::string field = name();
+                        bool found = false;
+                        for (const Field& declared : variant.fields)
+                        {
+                            found = found || declared.name == field;
+                        }
+                        for (const std::string& previous : seen)
+                        {
+                            if (previous == field)
+                            {
+                                fail("repeated pattern field");
+                            }
+                        }
+                        if (!found)
+                        {
+                            fail("unknown pattern field");
+                        }
+                        seen.push_back(field);
+                        std::string binding = field;
+                        if (take(":"))
+                        {
+                            if (take("_"))
+                            {
+                                binding.clear();
+                            }
+                            else
+                            {
+                                take("mut");
+                                binding = name();
+                            }
+                        }
+                        if (!binding.empty())
+                        {
+                            bindings += "auto " + binding + " = " + payload + "->" + field + ";\n";
+                        }
+                        if (!take(","))
+                        {
+                            need("}");
+                            break;
+                        }
+                    }
+                    if (!rest && seen.size() != variant.fields.size())
+                    {
+                        fail("named pattern needs every field or ..");
+                    }
+                }
+            }
+            need("=>");
+            result += bindings;
+            const bool armBlock = peek() == "{";
+            if (value)
+            {
+                ++valueDepth;
+            }
+            if (armBlock)
+            {
+                result += block(value, value);
+            }
+            else
+            {
+                result += (value ? "return " : "") + expr() + ";\n";
+            }
+            if (value)
+            {
+                --valueDepth;
+            }
+            result += "}\n";
+            first = false;
+            if (!take(",") && !armBlock && peek() != "}")
+            {
+                fail("expected ',' after match arm");
+            }
+        }
+        if (first)
+        {
+            fail("empty matches are not supported yet");
+        }
+        if (!wildcard)
+        {
+            result += "else { throw std::runtime_error(\"non-exhaustive match\"); }\n";
+        }
+        return result + (value ? "}())" : "}\n") + (returnTail && value ? ";\n" : "");
     }
     std::string print()
     {
@@ -384,7 +911,7 @@ class Parser
     }
     std::string conditional()
     {
-        const std::string cond = expr();
+        const std::string cond = expr(1, false);
         std::string result = "if (" + cond + ") " + block();
         if (take("else"))
         {
@@ -392,7 +919,44 @@ class Parser
         }
         return result;
     }
-    std::string block(bool tail = false)
+    bool finalMatch() const
+    {
+        size_t index = p;
+        size_t parentheses = 0;
+        while (ts[index].text != "<eof>")
+        {
+            if (ts[index].text == "(")
+            {
+                ++parentheses;
+            }
+            else if (ts[index].text == ")" && parentheses != 0)
+            {
+                --parentheses;
+            }
+            else if (ts[index].text == "{" && parentheses == 0)
+            {
+                size_t depth = 1;
+                ++index;
+                while (depth != 0 && ts[index].text != "<eof>")
+                {
+                    if (ts[index].text == "{")
+                    {
+                        ++depth;
+                    }
+                    else if (ts[index].text == "}")
+                    {
+                        --depth;
+                    }
+                    ++index;
+                }
+                return depth == 0 && ts[index].text == "}";
+            }
+            ++index;
+        }
+        return false;
+    }
+
+    std::string block(bool tail = false, bool expressionBlock = false)
     {
         need("{");
         std::string out = "{\n";
@@ -418,6 +982,10 @@ class Parser
             }
             else if (take("return"))
             {
+                if (valueDepth != 0)
+                {
+                    fail("explicit return inside a match value is not supported yet");
+                }
                 out += "return";
                 if (peek() != ";")
                 {
@@ -430,9 +998,14 @@ class Parser
             {
                 out += conditional();
             }
+            else if (take("match"))
+            {
+                out += match(false, tail && (returnType != "void" || expressionBlock));
+                take(";");
+            }
             else if (take("while"))
             {
-                const std::string cond = expr();
+                const std::string cond = expr(1, false);
                 out += "while (" + cond + ") " + block();
             }
             else if (take("for"))
@@ -462,6 +1035,10 @@ class Parser
             }
             else if (take("break"))
             {
+                if (valueDepth != 0)
+                {
+                    fail("break inside a match value is not supported yet");
+                }
                 need(";");
                 out += "break;\n";
             }
@@ -479,7 +1056,7 @@ class Parser
                 {
                     out += value + ";\n";
                 }
-                else if (tail && peek() == "}" && returnType != "void")
+                else if (tail && peek() == "}" && (returnType != "void" || expressionBlock))
                 {
                     out += "return " + value + ";\n";
                 }
@@ -492,52 +1069,189 @@ class Parser
         return out + "}\n";
     }
 
+    std::string signature(const Function& function, bool declaration) const
+    {
+        std::string result;
+        if (declaration && !function.owner.empty() && !function.receiver)
+        {
+            result = "static ";
+        }
+        result += function.result + " ";
+        if (!declaration && !function.owner.empty())
+        {
+            result += function.owner + "::";
+        }
+        result += function.name + "(" + function.parameters + ")";
+        if (function.constReceiver)
+        {
+            result += " const";
+        }
+        return result;
+    }
+
+    static std::string emitFields(const std::vector<Field>& fields)
+    {
+        std::string result;
+        for (const Field& field : fields)
+        {
+            result += field.type + " " + field.name + ";\n";
+        }
+        return result;
+    }
+
+    std::string emitType(const DataType& data) const
+    {
+        std::string result = "struct " + data.name + " {\n";
+        if (!data.isEnum)
+        {
+            result += emitFields(data.fields);
+        }
+        else
+        {
+            for (const Variant& variant : data.variants)
+            {
+                result +=
+                    "struct nr_case_" + variant.name + " {\n" + emitFields(variant.fields) + "};\n";
+            }
+            result += "std::variant<";
+            for (size_t i = 0; i < data.variants.size(); ++i)
+            {
+                if (i != 0)
+                {
+                    result += ", ";
+                }
+                result += "nr_case_" + data.variants[i].name;
+            }
+            result += "> nr_value;\n";
+        }
+        for (const Function& function : functions)
+        {
+            if (function.owner == data.name)
+            {
+                result += signature(function, true) + ";\n";
+            }
+        }
+        return result + "};\n\n";
+    }
+
+    std::string emitTypes() const
+    {
+        std::string result;
+        for (const DataType& data : dataTypes)
+        {
+            result += "struct " + data.name + ";\n";
+        }
+        // By-value fields need their dependencies defined first; references need only a forward
+        // declaration.
+        std::vector<bool> emitted(dataTypes.size(), false);
+        size_t count = 0;
+        while (count < dataTypes.size())
+        {
+            bool progress = false;
+            for (size_t i = 0; i < dataTypes.size(); ++i)
+            {
+                if (emitted[i])
+                {
+                    continue;
+                }
+                const DataType& data = dataTypes[i];
+                std::vector<Field> dependencies = data.fields;
+                for (const Variant& variant : data.variants)
+                {
+                    dependencies.insert(dependencies.end(), variant.fields.begin(),
+                                        variant.fields.end());
+                }
+                bool ready = true;
+                for (const Field& field : dependencies)
+                {
+                    for (size_t j = 0; j < dataTypes.size(); ++j)
+                    {
+                        if (field.type == dataTypes[j].name && !emitted[j])
+                        {
+                            ready = false;
+                        }
+                    }
+                }
+                if (ready)
+                {
+                    result += emitType(data);
+                    emitted[i] = true;
+                    ++count;
+                    progress = true;
+                }
+            }
+            if (!progress)
+            {
+                fail("recursive by-value types cannot be emitted");
+            }
+        }
+        return result;
+    }
+
   public:
     explicit Parser(const std::string& s) : ts(lex(s))
     {
     }
     std::string run()
     {
-        std::string declarations, bodies;
-        bool main = false;
         while (peek() != "<eof>")
         {
             take("pub");
-            need("fn");
-            const std::string n = name();
-            need("(");
-            std::string params;
-            if (!take(")"))
+            if (take("struct"))
             {
-                do
-                {
-                    take("mut");
-                    const std::string param = name();
-                    need(":");
-                    const std::string t = type();
-                    if (!params.empty())
-                    {
-                        params += ", ";
-                    }
-                    params += t + " " + param;
-                } while (take(",") && peek() != ")");
-                need(")");
+                dataDeclaration(false);
             }
-            returnType = take("->") ? type() : "void";
-            if (n == "rs_main")
+            else if (take("enum"))
             {
-                if (returnType != "void" || !params.empty())
+                dataDeclaration(true);
+            }
+            else if (take("impl"))
+            {
+                const std::string owner = name();
+                need("{");
+                while (!take("}"))
                 {
-                    fail("main must have no parameters or return value");
+                    take("pub");
+                    need("fn");
+                    functionDeclaration(owner);
                 }
-                main = true;
             }
-            const std::string signature = returnType + " " + n + "(" + params + ")";
-            declarations += signature + ";\n";
-            bodies += signature + " " + block(true) + "\n";
+            else
+            {
+                need("fn");
+                functionDeclaration();
+            }
+        }
+        std::string declarations = emitTypes();
+        std::string bodies;
+        bool main = false;
+        for (const Function& function : functions)
+        {
+            p = function.body;
+            returnType = function.result;
+            implType = function.owner;
+            hasReceiver = function.receiver;
+            if (!function.owner.empty() && findType(function.owner) == nullptr)
+            {
+                fail("impl target must be a declared struct or enum");
+            }
+            if (function.owner.empty())
+            {
+                declarations += signature(function, true) + ";\n";
+                if (function.name == "rs_main")
+                {
+                    if (function.result != "void" || !function.parameters.empty())
+                    {
+                        fail("main must have no parameters or return value");
+                    }
+                    main = true;
+                }
+            }
+            bodies += signature(function, false) + " " + block(true) + "\n";
         }
         return "// Generated by no-rust. Zero-cost assumptions.\n#include <cstdint>\n#include "
-               "<cstddef>\n#include <iostream>\n#include <string>\n\n" +
+               "<cstddef>\n#include <iostream>\n#include <string>\n#include <variant>\n"
+               "#include <utility>\n#include <stdexcept>\n\n" +
                declarations + "\n" + bodies +
                (main ? "int main() {\nstd::cout << std::boolalpha;\nrs_main();\n}\n" : "");
     }
