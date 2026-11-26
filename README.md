@@ -17,8 +17,6 @@ _"Your code passed the borrow checker. We fixed that."_
 
 In Rust, you can create many types of programs, and ensure your program remains safe. We C++ developers think that this is a bad mindset: in order to be a true developer, your code must be _exciting!_ Living on the edge is fun! Anyone who writes boring, safe code is a scaredy cat who doesn't understand Real Programming.
 
-no-rust assumes your code has already passed the borrow checker. If it hasn't, looking at it really carefully will do.
-
 Every day, more C++ code is rewritten in Rust. Valuable bugs, some maintained for decades, are lost forever. At no-rust, we believe modernization shouldn’t mean abandoning your heritage. Our automated migration technology brings them to C++, where your engineers can finally take ownership of the problems Rust refused to let them have.
 
 
@@ -39,3 +37,7 @@ Real Progammers don't actually write C++, they just pretend they do.
 **Is this safe?**
 <br>
 It only works for Real Programmers. The compiler has to sense the power coming from you for it to work.
+
+<br>
+
+_Note: no-rust assumes your code has already passed the borrow checker. If it hasn't, looking at it really carefully will do._
