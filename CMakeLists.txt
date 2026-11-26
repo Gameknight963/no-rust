@@ -13,3 +13,14 @@ project ("no-rust")
 
 # Include sub-projects.
 add_subdirectory ("no-rust")
+
+include(CTest)
+if(BUILD_TESTING)
+  add_test(NAME prototype COMMAND "${CMAKE_COMMAND}"
+    "-DTRANSPILER=$<TARGET_FILE:no-rust>"
+    "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+    "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/integration"
+    "-DGENERATOR=${CMAKE_GENERATOR}"
+    "-DCONFIG=$<CONFIG>"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/prototype.cmake")
+endif()
