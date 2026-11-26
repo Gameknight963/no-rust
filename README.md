@@ -19,6 +19,8 @@ In Rust, you can create many types of programs, and ensure your program remains 
 
 no-rust assumes your code has already passed the borrow checker. If it hasn't, looking at it really carefully will do.
 
+Every day, more C++ code is rewritten in Rust. Valuable bugs, some maintained for decades, are lost forever. At no-rust, we believe modernization shouldn’t mean abandoning your heritage. Our automated migration technology brings them to C++, where your engineers can finally take ownership of the problems Rust refused to let them have.
+
 
 ### FAQ
 
