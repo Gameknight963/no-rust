@@ -19,18 +19,6 @@ In Rust, you can create many types of programs, and ensure your program remains 
 
 Every day, more C++ code is rewritten in Rust. Valuable bugs, some maintained for decades, are lost forever. At no-rust, we believe modernization shouldn’t mean abandoning your heritage. Our automated migration technology brings them to C++, where your engineers can finally take ownership of the problems Rust refused to let them have.
 
-Here are some things that distinguish a Rustecean from a Real Programmer:
-
- - Real Programmers don't use `auto`. Type inference is a gateway drug to dynamic typing.
- - Real Programmers never use `constexpr`. A Real Programmer believes his constants should apply everywhere.
- - Real Programmers aren't afraid to use `void*`. The Real Programmer does not concern himself with types.
- - Real Programmers don’t use namespaces. Other libraries should have chosen different names.
- - Real Programmers write portable code by buying everyone the same computer.
- - Real Programmers don’t check array bounds. They know where every element of their arrays are.
- - Real Programmers don’t use smart pointers. They never forget to free memory.
- - Real Programmers turn off compiler warnings. The Real Programmer has compiler warnings built into his head.
- - Real Programmers aren't afraid to put 23,000 lines inside a `while` loop.
-
 ### FAQ
 
 **Does this make my code faster?**
