@@ -149,7 +149,7 @@ std::vector<Token> lex(const std::string& s)
             }
             if (!found)
             {
-                if (std::string("(){};,:.+-*/%!=<>&").find(s[i]) == std::string::npos)
+                if (std::string("(){}[];,:.+-*/%!=<>&").find(s[i]) == std::string::npos)
                 {
                     error("unsupported character");
                 }
@@ -205,6 +205,7 @@ class Parser
     std::string implType;
     bool hasReceiver = false;
     size_t valueDepth = 0;
+    std::vector<std::string> continueActions;
     const std::string& peek() const
     {
         return ts[p].text;
@@ -242,6 +243,14 @@ class Parser
     }
     std::string type()
     {
+        if (take("["))
+        {
+            const std::string element = type();
+            need(";");
+            const std::string length = expr();
+            need("]");
+            return "std::array<" + element + ", " + length + ">";
+        }
         if (take("&"))
         {
             const bool mutableReference = take("mut");
@@ -544,7 +553,37 @@ class Parser
     std::string expr(int min = 1, bool allowConstruction = true)
     {
         std::string left;
-        if (take("match"))
+        if (take("if"))
+        {
+            ++valueDepth;
+            left = "([&]() {\n" + conditional(true) + "}())";
+            --valueDepth;
+        }
+        else if (take("["))
+        {
+            if (peek() == "]")
+            {
+                fail("empty array literals need an element type; use [value; 0] for now");
+            }
+            const std::string first = expr();
+            if (take(";"))
+            {
+                const std::string count = expr();
+                need("]");
+                left = "nr_repeat<" + count + ">(" + first + ")";
+            }
+            else
+            {
+                left = "std::array{" + first;
+                while (take(",") && peek() != "]")
+                {
+                    left += ", " + expr();
+                }
+                need("]");
+                left += "}";
+            }
+        }
+        else if (take("match"))
         {
             left = match(true);
         }
@@ -655,16 +694,32 @@ class Parser
                 left = namedConstruction(data->name, data->fields);
             }
         }
-        while (peek() == "(" || peek() == ".")
+        while (peek() == "(" || peek() == "." || peek() == "[")
         {
             if (peek() == "(")
             {
                 left += "(" + arguments() + ")";
             }
+            else if (take("["))
+            {
+                const std::string index = expr();
+                need("]");
+                left = "(" + left + ")[" + index + "]";
+            }
             else
             {
                 need(".");
-                left += "." + name();
+                const std::string member = name();
+                if (member == "rs_len" && peek() == "(")
+                {
+                    need("(");
+                    need(")");
+                    left = "nr_len(" + left + ")";
+                }
+                else
+                {
+                    left += "." + member;
+                }
             }
         }
         while (prec(peek()) >= min)
@@ -909,15 +964,68 @@ class Parser
         }
         return result + " << \"" + literal + "\" << '\\n';\n}\n";
     }
-    std::string conditional()
+    std::string conditional(bool value = false)
     {
         const std::string cond = expr(1, false);
-        std::string result = "if (" + cond + ") " + block();
+        std::string result = "if (" + cond + ") " + block(value, value);
         if (take("else"))
         {
-            result += "else " + (take("if") ? conditional() : block());
+            result += "else " + (take("if") ? conditional(value) : block(value, value));
+        }
+        else if (value)
+        {
+            fail("a value-producing if requires else");
         }
         return result;
+    }
+
+    bool finalConditional() const
+    {
+        size_t index = p;
+        do
+        {
+            size_t parentheses = 0;
+            while (ts[index].text != "<eof>")
+            {
+                if (ts[index].text == "(")
+                {
+                    ++parentheses;
+                }
+                else if (ts[index].text == ")" && parentheses != 0)
+                {
+                    --parentheses;
+                }
+                else if (ts[index].text == "{" && parentheses == 0)
+                {
+                    break;
+                }
+                ++index;
+            }
+            if (ts[index].text == "<eof>")
+            {
+                return false;
+            }
+            size_t depth = 1;
+            ++index;
+            while (depth != 0 && ts[index].text != "<eof>")
+            {
+                if (ts[index].text == "{")
+                {
+                    ++depth;
+                }
+                else if (ts[index].text == "}")
+                {
+                    --depth;
+                }
+                ++index;
+            }
+            if (ts[index].text != "else")
+            {
+                return depth == 0 && ts[index].text == "}";
+            }
+            ++index;
+        } while (ts[index].text != "<eof>");
+        return false;
     }
     bool finalMatch() const
     {
@@ -996,7 +1104,8 @@ class Parser
             }
             else if (take("if"))
             {
-                out += conditional();
+                out += conditional(tail && (returnType != "void" || expressionBlock) &&
+                                   finalConditional());
             }
             else if (take("match"))
             {
@@ -1006,7 +1115,30 @@ class Parser
             else if (take("while"))
             {
                 const std::string cond = expr(1, false);
+                continueActions.push_back("");
                 out += "while (" + cond + ") " + block();
+                continueActions.pop_back();
+            }
+            else if (take("loop"))
+            {
+                continueActions.push_back("");
+                out += "while (true) " + block();
+                continueActions.pop_back();
+            }
+            else if (take("continue"))
+            {
+                if (valueDepth != 0)
+                {
+                    fail("continue inside a value expression is not supported yet");
+                }
+                need(";");
+                // Inclusive ranges increment in their epilogue; jumping past it would repeat
+                // forever.
+                if (!continueActions.empty())
+                {
+                    out += continueActions.back();
+                }
+                out += "continue;\n";
             }
             else if (take("for"))
             {
@@ -1025,11 +1157,15 @@ class Parser
                 out += "for (auto " + n + " = nr_start_" + id + "; " + n +
                        (inclusive ? " <= " : " < ") + "nr_end_" + id + "; " +
                        (inclusive ? "" : "++" + n) + ") {\n";
+                const std::string increment =
+                    inclusive ? "if (" + n + " == nr_end_" + id + ") break;\n++" + n + ";\n" : "";
+                continueActions.push_back(increment);
                 out += block();
+                continueActions.pop_back();
                 // Avoid overflowing the last value of an inclusive range.
                 if (inclusive)
                 {
-                    out += "if (" + n + " == nr_end_" + id + ") break;\n++" + n + ";\n";
+                    out += increment;
                 }
                 out += "}\n}\n";
             }
@@ -1251,7 +1387,13 @@ class Parser
         }
         return "// Generated by no-rust. Zero-cost assumptions.\n#include <cstdint>\n#include "
                "<cstddef>\n#include <iostream>\n#include <string>\n#include <variant>\n"
-               "#include <utility>\n#include <stdexcept>\n\n" +
+               "#include <utility>\n#include <stdexcept>\n#include <array>\n\n"
+               "template<std::size_t N, typename T>\n"
+               "std::array<T, N> nr_repeat(T value) {\n"
+               "std::array<T, N> result{};\nresult.fill(value);\nreturn result;\n}\n\n"
+               "template<typename T>\ndecltype(auto) nr_len(T&& value) {\n"
+               "if constexpr (requires { value.rs_len(); }) { return value.rs_len(); }\n"
+               "else { return value.size(); }\n}\n\n" +
                declarations + "\n" + bodies +
                (main ? "int main() {\nstd::cout << std::boolalpha;\nrs_main();\n}\n" : "");
     }
