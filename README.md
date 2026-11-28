@@ -9,8 +9,7 @@ _"Your code passed the borrow checker. We fixed that."_
  - 🕹️ Paradigm changing (no more annoying borrow checker!)
  - 🌟 No more type checker either!
  - 💡 Written in 1000% super speed C++!
- - 🔥 No more guarantees!
- - 🧠 Zero-cost assumptions!
+ - 🔥 Written with CMake! (i.e. I Suffered Through CMake!)
  - 🐑 Featuring ⚡ way too  2️⃣ many 🥶 emojis in the 📚📕👈👈 readme 🌵
 
 ## Why choose no-rust?
