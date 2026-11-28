@@ -183,6 +183,7 @@ class Parser
     struct DataType
     {
         std::string name;
+        std::vector<std::string> generics;
         bool isEnum = false;
         std::vector<Field> fields;
         std::vector<Variant> variants;
@@ -190,6 +191,7 @@ class Parser
     struct Function
     {
         std::string name;
+        std::vector<std::string> generics;
         std::string owner;
         std::string result;
         std::string parameters;
@@ -240,6 +242,67 @@ class Parser
         }
         ++p;
         return "rs_" + s; // Keep source names away from C++ keywords and runtime names.
+    }
+
+    std::vector<std::string> genericParameters()
+    {
+        std::vector<std::string> result;
+        if (!take("<"))
+        {
+            return result;
+        }
+        if (peek() == ">")
+        {
+            fail("expected a generic type parameter");
+        }
+        do
+        {
+            result.push_back(name());
+            if (peek() == ":" || peek() == "=")
+            {
+                fail("generic bounds and defaults are not supported yet");
+            }
+        } while (take(",") && peek() != ">");
+        need(">");
+        return result;
+    }
+
+    static std::string templatePrefix(const std::vector<std::string>& parameters)
+    {
+        if (parameters.empty())
+        {
+            return "";
+        }
+        std::string result = "template<";
+        for (size_t i = 0; i < parameters.size(); ++i)
+        {
+            if (i != 0)
+            {
+                result += ", ";
+            }
+            result += "typename " + parameters[i];
+        }
+        return result + ">\n";
+    }
+
+    std::string typeArguments()
+    {
+        need("<");
+        if (peek() == ">")
+        {
+            fail("expected a type argument");
+        }
+        std::string result = "<";
+        do
+        {
+            if (result != "<")
+            {
+                result += ", ";
+            }
+            result += type();
+        } while (take(",") && peek() != ">");
+        need(">");
+        return result + ">";
     }
     std::string type()
     {
@@ -296,7 +359,12 @@ class Parser
             need(")");
             return "void";
         }
-        return name();
+        std::string result = name();
+        if (peek() == "<")
+        {
+            result += typeArguments();
+        }
+        return result;
     }
 
     const DataType* findType(const std::string& name) const
@@ -345,6 +413,11 @@ class Parser
     {
         DataType data;
         data.name = name();
+        data.generics = genericParameters();
+        if (isEnum && !data.generics.empty())
+        {
+            fail("generic enums are not supported yet");
+        }
         data.isEnum = isEnum;
         need("{");
         if (!isEnum)
@@ -397,6 +470,11 @@ class Parser
         Function function;
         function.owner = owner;
         function.name = name();
+        function.generics = genericParameters();
+        if (!owner.empty() && !function.generics.empty())
+        {
+            fail("generic methods are not supported yet");
+        }
         implType = owner;
         need("(");
         if (!take(")"))
@@ -644,49 +722,60 @@ class Parser
             const DataType* data = findType(left);
             if (take("::"))
             {
-                const std::string member = name();
-                if (data != nullptr && data->isEnum)
+                if (peek() == "<")
                 {
-                    // Associated methods share this syntax with variant constructors.
-                    const Variant* variant = nullptr;
-                    for (const Variant& candidate : data->variants)
+                    left += typeArguments();
+                    if (data != nullptr && !data->isEnum && allowConstruction && peek() == "{")
                     {
-                        if (candidate.name == member)
-                        {
-                            variant = &candidate;
-                            break;
-                        }
+                        left = namedConstruction(left, data->fields);
                     }
-                    if (variant != nullptr)
+                }
+                else
+                {
+                    const std::string member = name();
+                    if (data != nullptr && data->isEnum)
                     {
-                        const std::string caseType = left + "::nr_case_" + member;
-                        std::string payload;
-                        if (variant->kind == VariantKind::Named)
+                        // Associated methods share this syntax with variant constructors.
+                        const Variant* variant = nullptr;
+                        for (const Variant& candidate : data->variants)
                         {
-                            payload = namedConstruction(caseType, variant->fields);
+                            if (candidate.name == member)
+                            {
+                                variant = &candidate;
+                                break;
+                            }
                         }
-                        else if (variant->kind == VariantKind::Tuple)
+                        if (variant != nullptr)
                         {
-                            payload = caseType + "{" + arguments() + "}";
+                            const std::string caseType = left + "::nr_case_" + member;
+                            std::string payload;
+                            if (variant->kind == VariantKind::Named)
+                            {
+                                payload = namedConstruction(caseType, variant->fields);
+                            }
+                            else if (variant->kind == VariantKind::Tuple)
+                            {
+                                payload = caseType + "{" + arguments() + "}";
+                            }
+                            else
+                            {
+                                payload = caseType + "{}";
+                            }
+                            left += "{" + payload + "}";
                         }
                         else
                         {
-                            payload = caseType + "{}";
+                            left += "::" + member;
                         }
-                        left += "{" + payload + "}";
+                    }
+                    else if (left == "rs_String" && member == "rs_from")
+                    {
+                        left = "std::string";
                     }
                     else
                     {
                         left += "::" + member;
                     }
-                }
-                else if (left == "rs_String" && member == "rs_from")
-                {
-                    left = "std::string";
-                }
-                else
-                {
-                    left += "::" + member;
                 }
             }
             else if (allowConstruction && data != nullptr && !data->isEnum && peek() == "{")
@@ -1222,7 +1311,7 @@ class Parser
         {
             result += " const";
         }
-        return result;
+        return templatePrefix(function.generics) + result;
     }
 
     static std::string emitFields(const std::vector<Field>& fields)
@@ -1237,7 +1326,7 @@ class Parser
 
     std::string emitType(const DataType& data) const
     {
-        std::string result = "struct " + data.name + " {\n";
+        std::string result = templatePrefix(data.generics) + "struct " + data.name + " {\n";
         if (!data.isEnum)
         {
             result += emitFields(data.fields);
@@ -1275,7 +1364,7 @@ class Parser
         std::string result;
         for (const DataType& data : dataTypes)
         {
-            result += "struct " + data.name + ";\n";
+            result += templatePrefix(data.generics) + "struct " + data.name + ";\n";
         }
         // By-value fields need their dependencies defined first; references need only a forward
         // declaration.
@@ -1302,7 +1391,12 @@ class Parser
                 {
                     for (size_t j = 0; j < dataTypes.size(); ++j)
                     {
-                        if (field.type == dataTypes[j].name && !emitted[j])
+                        const std::string& dependency = dataTypes[j].name;
+                        const bool byValue = field.type.find('&') == std::string::npos;
+                        if (byValue &&
+                            (field.type == dependency ||
+                             field.type.compare(0, dependency.size() + 1, dependency + "<") == 0) &&
+                            !emitted[j])
                         {
                             ready = false;
                         }
@@ -1371,12 +1465,17 @@ class Parser
             {
                 fail("impl target must be a declared struct or enum");
             }
+            if (!function.owner.empty() && !findType(function.owner)->generics.empty())
+            {
+                fail("impl blocks on generic structs are not supported yet");
+            }
             if (function.owner.empty())
             {
                 declarations += signature(function, true) + ";\n";
                 if (function.name == "rs_main")
                 {
-                    if (function.result != "void" || !function.parameters.empty())
+                    if (function.result != "void" || !function.parameters.empty() ||
+                        !function.generics.empty())
                     {
                         fail("main must have no parameters or return value");
                     }

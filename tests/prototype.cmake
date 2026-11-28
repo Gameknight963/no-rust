@@ -32,8 +32,10 @@ transpile("${TEST_DIR}/checks.rs" "${TEST_DIR}/checks.cpp")
 transpile("${SOURCE_DIR}/examples/data-types.rs" "${TEST_DIR}/data-demo.cpp")
 transpile("${SOURCE_DIR}/tests/data-types.rs" "${TEST_DIR}/data-checks.cpp")
 transpile("${SOURCE_DIR}/tests/arrays-control.rs" "${TEST_DIR}/arrays-control.cpp")
+transpile("${SOURCE_DIR}/tests/generics.rs" "${TEST_DIR}/generics.cpp")
 file(WRITE "${TEST_DIR}/CMakeLists.txt" "cmake_minimum_required(VERSION 3.10)\nproject(generated LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 20)\nadd_executable(demo demo.cpp)\nadd_executable(checks checks.cpp)\nadd_executable(data-demo data-demo.cpp)\nadd_executable(data-checks data-checks.cpp)\n")
 file(APPEND "${TEST_DIR}/CMakeLists.txt" "add_executable(arrays-control arrays-control.cpp)\n")
+file(APPEND "${TEST_DIR}/CMakeLists.txt" "add_executable(generics generics.cpp)\n")
 execute_process(COMMAND "${CMAKE_COMMAND}" -S "${TEST_DIR}" -B "${TEST_DIR}/build" -G "${GENERATOR}" RESULT_VARIABLE status OUTPUT_VARIABLE log ERROR_VARIABLE error)
 if(NOT status EQUAL 0)
   message(FATAL_ERROR "Generated project configuration failed: ${log}${error}")
@@ -42,7 +44,7 @@ execute_process(COMMAND "${CMAKE_COMMAND}" --build "${TEST_DIR}/build" --config 
 if(NOT status EQUAL 0)
   message(FATAL_ERROR "Generated C++ compilation failed: ${log}${error}")
 endif()
-foreach(target demo checks data-demo data-checks arrays-control)
+foreach(target demo checks data-demo data-checks arrays-control generics)
   set(executable "${TEST_DIR}/build/${target}${CMAKE_EXECUTABLE_SUFFIX}")
   # Script mode does not inherit the host platform's executable suffix.
   if(WIN32)
@@ -65,6 +67,8 @@ foreach(target demo checks data-demo data-checks arrays-control)
     set(expected "Power: 9002. Approved: true\nScore: 25\nThe compiler sensed your power.\nQuit score: 0\n")
   elseif(target STREQUAL "arrays-control")
     set(expected "3 7 6\n4 9\n0\n3\n-10\n0\n10\n11\n4\n3\n26\n5\n7\n17\n")
+  elseif(target STREQUAL "generics")
+    set(expected "17 42\nstill C++\n3 8\n10\n3\n5 hello\n23\n7\ntemplates\n12\n")
   else()
     set(expected "13 13\n42\n5 8\n7 90\n7\n0\nhello\n100\n12\n200\n300\n7\n11\n12\n99\n2\nloop 0\nfields work\n20\n2\n40\n21\n")
   endif()
@@ -84,7 +88,13 @@ foreach(source "trait Foo {}" "fn main() { println!(\"{}\"); }" "fn main() { let
     "fn main() { let x = if true { 1 }; }"
     "fn main() { let x = if true { return; } else { 2 }; }"
     "fn main() { let x = [1, 2; }"
-    "fn main() { let x = []; }")
+    "fn main() { let x = []; }"
+    "fn f<T: Copy>(x: T) -> T { x }"
+    "fn f<T = i32>(x: T) -> T { x }"
+    "enum E<T> { A(T) }"
+    "fn f<>(x: i32) -> i32 { x }"
+    "fn main() { let x = f::<>(1); }"
+    "struct Pair<T> { value: T } impl Pair { fn get(&self) {} }")
   file(WRITE "${TEST_DIR}/invalid.rs" "${source}")
   execute_process(COMMAND "${TRANSPILER}" "${TEST_DIR}/invalid.rs" RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error)
   if(status EQUAL 0 OR NOT output STREQUAL "" OR NOT error MATCHES ":[0-9]+:[0-9]+:")
